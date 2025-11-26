@@ -1,0 +1,49 @@
+
+pipeline: {}
+
+checkpoint:
+  force_fetch: false   # Set true to ignore existing data and re-fetch from source
+  force_rebuild: false  # Set true to ignore dataset checkpoint and rebuild features
+  force_retrain: true  # Set true to ignore model checkpoint and retrain
+
+model:
+  # Ranking-only configuration
+  params: {}
+  tune_regularization: true    # enable tuning on next training run
+  tune_max_evals: 300         # number of random trials for tuning (controls runtime)
+  # Early stopping and primary evaluation cutoff (ndcg@k)
+  primary_k: 20
+  early_stopping_rounds: 20
+  # Override grid to emphasize anti-overfitting (structure + subsampling + regularization)
+  tune_param_grid:
+    # Tree shape around balanced defaults
+    num_leaves: {low: 3, high: 40, type: int}
+    max_depth: {low: 3, high: 40, type: int}
+    min_data_in_leaf: {low: 200, high: 500, type: int}
+    # Regularization
+    lambda_l1: {low: 0.2, high: 2.0, type: float, log: true}
+    lambda_l2: {low: 8.0, high: 40.0, type: float, log: true}
+    min_gain_to_split: {low: 0.0, high: 0.12, type: float}
+    min_sum_hessian_in_leaf: {low: 2.0, high: 10.0, type: float, log: true}
+    cat_smooth: {low: 5.0, high: 50.0, type: float}
+    cat_l2: {low: 1.0, high: 50.0, type: float, log: true}
+    max_bin: {low: 30, high: 255, type: int}
+    # Learning rate (keep near 0.06)
+    learning_rate: {low: 0.04, high: 0.08, type: float, log: true}
+    # Subsampling
+    feature_fraction: {low: 0.5, high: 0.7, type: float}
+    bagging_fraction: {low: 0.5, high: 0.7, type: float}
+    bagging_freq: {low: 1, high: 4, type: int}
+
+
+prediction:
+  top_n: 20
+
+backtest:
+  run: true                # set false to skip during pipeline
+  use_model_score: true     # if false, use a single feature column as score
+  score_col: null           # e.g., price_ma_ratio_z_63d (used when use_model_score=false or model missing)
+  top_n: 20
+  bottom_n: 20
+  require_min_cross_section: 30
+
