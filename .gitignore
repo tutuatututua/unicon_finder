@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local secrets
+.env
+.env.*
+
+# Data & artifacts (generated; can be large)
+# If you *want* to version model artifacts or datasets, remove these rules.
+data/raw/
+data/processed/
+backtest/
+models/*.txt
+models/*.csv
+models/*.png
+models/*.json
+
+# Selenium / driver caches
+*.crdownload

@@ -1,6 +1,6 @@
 # unicon_finder
 
-Learn-to-rank pipeline for US equities: download price history, build a feature panel, train a LightGBM **LambdaRank** model with **walk-forward validation**, and generate top-\(N\) ticker predictions.
+Learn-to-rank pipeline for US equities: download price history, build a feature panel, train a LightGBM **LambdaRank** model with a simple **time-based train/validation split**, and generate top-\(N\) ticker predictions.
 
 ## Quick start (Windows / PowerShell)
 
@@ -36,39 +36,42 @@ The main entrypoint is [scripts/run_pipeline.py](scripts/run_pipeline.py). It ru
 6. **Prediction** (top-\(N\) tickers)
 7. **Backtest** (optional; `backtest.run`)
 
+## Walk-forward backtest (out-of-sample)
+
+To measure **realistic historical performance**, use the purged walk-forward backtest. It repeatedly:
+
+- trains on an earlier window
+- validates on a later window
+- tests on the next window (out-of-sample)
+
+It also applies a **purge gap** (by default equal to the target horizon, e.g. 252 trading days for `target_fwd_252d`) to reduce label-overlap leakage.
+
+```powershell
+python .\scripts\backtest\walkforward_backtest.py --valid-days 252 --test-days 63 --step-days 63 --top-n 20 --rebalance-step 21
+```
+
+Outputs are written under `backtest/walkforward/`:
+
+- `summary.json`: high-level summary
+- `splits.csv`: metrics per walk-forward split
+- `trades.csv`: per-rebalance portfolio forward returns vs benchmark
+
 ## Training: how it works
 
-Training is implemented in [scripts/train/wf/pipeline.py](scripts/train/wf/pipeline.py) and uses **walk-forward validation**:
+Training is implemented in [scripts/train/pipeline.py](scripts/train/pipeline.py) and uses a **single chronological split**:
 
 - **Group/query definition:** each *date* is a ranking query; all tickers on that date form the items to rank.
-- **Label:** continuous forward return (default `target_fwd_252d`) is converted into discrete **relevance bins** (quantiles).
-- **Leakage control:** a `forward_gap_days` gap is enforced between train and validation windows.
+- **Label:** continuous forward return (default `target_fwd_252d`) is converted into discrete **relevance bins** using **per-date ranking**.
+- **Leakage control:** a `forward_gap_days` gap is enforced between `train_end` and `valid_start`.
 
-### One fold (example)
+The trainer:
 
-Assume:
-- `train_window_days = 1095`
-- `valid_days = 365`
-- `forward_gap_days = 252`
-
-If a fold has:
-- `valid_start = 2022-01-03`
-- `valid_end_exclusive = 2023-01-03`
-
-Then:
-- `train_end` is snapped to the nearest available trading date at `valid_start - 252 days` (about `2021-04-26`)
-- `train_start` is snapped to `train_end - 1095 days` (about `2018-04-26`)
-
-Within that fold, the trainer:
-
-1. **Selects rows** in TRAIN and VALID windows.
-2. **Fits relevance bins on TRAIN only** (quantile edges via `qcut`) and applies them to both TRAIN and VALID.
+1. **Loads the labeled panel** from `data/processed/raw_training.parquet`.
+2. **Splits once** into TRAIN and VALID by date (VALID is the last `valid_days` dates).
 3. **Builds group sizes per date** for LightGBM LambdaRank.
 4. **Optionally scales numeric features** (z-score) fit on TRAIN only.
-5. **Trains LightGBM** with early stopping based on VALID NDCG.
-6. **Logs metrics** for the fold (NDCG@k and Spearman on VALID).
-
-After all folds, it trains a **final model** on the full eligible training history (up to the latest date), using the average fold `best_iteration` as the final boosting rounds.
+5. **Trains LightGBM once** with early stopping based on VALID NDCG.
+6. **Writes artifacts** (model, metrics, features metadata) into `models/`.
 
 ## Configuration
 
@@ -81,14 +84,8 @@ All runtime toggles live in `config.yaml`.
 Model-related keys (examples):
 
 - `model.params`: LightGBM parameter overrides
-- `model.tune_regularization`: enable random-search tuning
-- `model.tune_param_grid`, `model.tune_max_evals`
-- `model.early_stopping_rounds`, `model.primary_k`
-
-Walk-forward window settings (e.g. `valid_days`, `step_days`, `train_window_days`, `forward_gap_days`, `min_cross_section`) are configured in code via `WalkForwardConfig`.
-
-- Defaults live in [scripts/train/wf/config.py](scripts/train/wf/config.py).
-- To change them for pipeline runs, pass an explicit config from [scripts/run_pipeline.py](scripts/run_pipeline.py) into `train_model_learn_to_rank(cfg=WalkForwardConfig(...))`.
+- `model.num_boost_round`, `model.early_stopping_rounds`, `model.primary_k`
+- `model.split.*`: train/validation split settings
 
 ## Outputs
 
@@ -97,22 +94,22 @@ Typical generated artifacts:
 - `data/raw/`: downloaded price history
 - `data/processed/`: feature panel and snapshots
 - `models/lightgbm_model.txt`: trained model
-- `models/metrics.json`: fold metrics + aggregate metrics
+- `models/metrics.json`: validation metrics for the single split
 - `models/feature_importance.csv` (+ optional PNG)
-- `models/features.json`, `models/preprocessing.json`: metadata used at prediction time
+- `models/features.json`: metadata used at prediction time (features, categorical levels, preprocessing)
 - `backtest/`: backtest CSV/JSON outputs (if enabled)
 
 ## Troubleshooting
 
-- **Not enough tickers per date:** decrease `WalkForwardConfig(min_cross_section=...)`.
-- **Training is slow:** increase `WalkForwardConfig(train_date_step=...)` / `WalkForwardConfig(valid_date_step=...)`, or reduce `WalkForwardConfig(train_window_days=...)`.
-- **LightGBM errors about groups:** ensure your feature panel has many tickers per date and dates aren’t filtered too aggressively.
+- **Not enough tickers per date:** decrease `model.split.min_cross_section`.
+- **Not enough history for split:** decrease `model.split.valid_days` or `model.split.forward_gap_days`.
+- **LightGBM errors about groups:** ensure your feature panel has many tickers per date.
 
 ## Project layout (high level)
 
 - [scripts/run_pipeline.py](scripts/run_pipeline.py): orchestrates the full pipeline
-- [scripts/train/train.py](scripts/train/train.py): training entrypoint (calls walk-forward trainer)
-- [scripts/train/wf/](scripts/train/wf/): walk-forward training implementation
+- [scripts/train/train.py](scripts/train/train.py): training entrypoint
+- [scripts/train/pipeline.py](scripts/train/pipeline.py): single-split training implementation
 - `data/`: universe, sector map, raw downloads, processed features
 - `models/`: trained model + training artifacts
 - `tests/`: unit/regression tests

@@ -1,0 +1,23 @@
+{
+  "best_iteration": 5,
+  "primary_k": 200,
+  "valid_ndcg@200": 0.6323261621430807,
+  "split": {
+    "train_start": "2022-12-19",
+    "train_end": "2024-06-21",
+    "valid_start": "2024-07-24",
+    "valid_end": "2025-01-23",
+    "valid_days": 126,
+    "forward_gap_days": 21,
+    "train_days": 378,
+    "n_dates": 11307
+  },
+  "feature_filter": {
+    "input": 29,
+    "kept": 29,
+    "dropped_missing": 0,
+    "dropped_unique": 0,
+    "dropped_constant": 0
+  },
+  "score_sign": 1.0
+}
