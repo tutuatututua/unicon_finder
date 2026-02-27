@@ -2,8 +2,8 @@
 pipeline: {}
 
 checkpoint:
-  force_fetch: false   # Set true to ignore existing data and re-fetch from source
-  force_rebuild: false   # Set true to ignore dataset checkpoint and rebuild features
+  force_fetch: true   # Set true to ignore existing data and re-fetch from source
+  force_rebuild: true   # Set true to ignore dataset checkpoint and rebuild features
   force_retrain: true  # Set true to ignore model checkpoint and retrain
 
 model:
@@ -28,7 +28,7 @@ model:
     log_evaluation_period: 50
   params:
     # LightGBM LambdaRank parameters.
-    learning_rate: 0.05
+    learning_rate: 0.1
     num_leaves: 62
     max_depth: 13
     min_data_in_leaf: 800

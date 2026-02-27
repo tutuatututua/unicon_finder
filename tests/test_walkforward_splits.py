@@ -37,3 +37,23 @@ def test_walkforward_splits_respect_purge_and_order():
         assert sp["train_start"] <= sp["train_end"]
         assert sp["valid_start"] <= sp["valid_end"]
         assert sp["test_start"] <= sp["test_end"]
+
+
+def test_walkforward_splits_non_overlapping_tests_when_step_equals_test_days():
+    dates = pd.date_range("2020-01-01", periods=500, freq="B")
+
+    splits = generate_walkforward_splits(
+        dates,
+        train_days=200,
+        valid_days=50,
+        test_days=40,
+        step_days=40,
+        purge_days=10,
+        max_splits=5,
+    )
+    assert len(splits) >= 2
+
+    for a, b in zip(splits, splits[1:]):
+        a_end = pd.Timestamp(a["test_end"]).normalize()
+        b_start = pd.Timestamp(b["test_start"]).normalize()
+        assert b_start > a_end
