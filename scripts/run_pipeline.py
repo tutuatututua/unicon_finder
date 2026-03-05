@@ -17,6 +17,7 @@ This script is intentionally thin: heavy logic lives in dedicated modules.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,14 +32,13 @@ if __package__ in (None, ""):
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-from scripts.backtest.backtest import BacktestConfig, run_backtest
 from scripts.data.data_download import download_full_history
 from scripts.data.download_all_us_tickers import get_all_tickers
 from scripts.feature.feature_engineering import build_features
 from scripts.config.logging import get_logger
 from scripts.predict import predict
-from scripts.train.train import train_model_learn_to_rank
 from scripts.train.config import TrainValidSplitConfig
+from scripts.train.pipeline import train_single_split
 from scripts.config.config import CheckpointConfig, PredictionConfig, load_yaml_config
 from scripts.config.paths import ProjectPaths
 logger = get_logger(__name__)
@@ -137,45 +137,47 @@ def main() -> None:
 
     # --- Stage 5: Model Training ---
     logger.info("Starting model training stage...")
-    model_cfg = raw_cfg.get('model', {})
-
     metrics: dict[str, Any] = {}
     force_retrain = checkpoint_cfg.force_retrain
     if force_retrain or not _has_trained_model(paths.model_file):
         logger.info("Training ranking head (LambdaRank) (force=%s)...", force_retrain)
 
-        split_cfg_raw = model_cfg.get("split", {}) if isinstance(model_cfg.get("split", {}), dict) else {}
+        # Model config from YAML (optional).
+        model_cfg = raw_cfg.get("model", {})
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
 
-        fs_raw = split_cfg_raw.get("feature_scaling", "none")
-        if str(fs_raw).strip().lower() == "zscore":
-            logger.warning("feature_scaling='zscore' is no longer supported; using 'none'.")
-        feature_scaling = "none"
-
-        train_days_parsed: int | None
-        td_raw = split_cfg_raw.get("train_days")
-        if td_raw is None:
-            train_days_parsed = None
+        # Threads: default to all CPU cores unless explicitly configured.
+        num_threads_raw = model_cfg.get("num_threads")
+        if num_threads_raw is None:
+            n_threads = int(os.cpu_count() or 1)
         else:
-            train_days_parsed = int(td_raw)
+            n_threads = int(num_threads_raw)
+        if n_threads < 1:
+            n_threads = 1
+
+        primary_k = model_cfg.get("primary_k", 20)
+        primary_k_int = int(primary_k) if primary_k is not None else None
+
+
+        eval_at = model_cfg.get("eval_at")
+        lgb_params: dict[str, Any] = {}
+        if isinstance(eval_at, (list, tuple)) and eval_at:
+            lgb_params["eval_at"] = [int(x) for x in eval_at if int(x) > 0]
+
+        num_boost_round = int(model_cfg.get("num_boost_round", 2000))
+        early_stopping_rounds = int(model_cfg.get("early_stopping_rounds", 50))
 
         cfg = TrainValidSplitConfig(
-            train_days=train_days_parsed,
-            valid_days=int(split_cfg_raw.get("valid_days", 365)),
-            forward_gap_days=int(split_cfg_raw.get("forward_gap_days", 5)),
-            min_cross_section=int(split_cfg_raw.get("min_cross_section", 200)),
-            n_relevance_bins=int(split_cfg_raw.get("n_relevance_bins", 20)),
-            include_sector_industry=bool(split_cfg_raw.get("include_sector_industry", True)),
-            feature_scaling=feature_scaling,
-            num_threads=int(split_cfg_raw.get("num_threads", 1)),
-            log_evaluation_period=int(split_cfg_raw.get("log_evaluation_period", 50)),
-            lgb_params=(model_cfg.get("params", {}) if isinstance(model_cfg.get("params", {}), dict) else {}),
+            num_threads=n_threads,
+            lgb_params=lgb_params,
         )
 
-        metrics['ranking'] = train_model_learn_to_rank(
-            num_boost_round=int(model_cfg.get('num_boost_round', 1500)),
-            early_stopping_rounds=int(model_cfg.get('early_stopping_rounds', 40)),
-            primary_k=int(model_cfg.get('primary_k', 200)),
+        metrics["ranking"] = train_single_split(
             cfg=cfg,
+            num_boost_round=num_boost_round,
+            early_stopping_rounds=early_stopping_rounds,
+            primary_k=primary_k_int,
         )
     else:
         logger.info("Model already trained; skipping retrain.")
@@ -190,24 +192,6 @@ def main() -> None:
     predictions = predict(top_n=top_n, snapshot=snapshot_mode)
     logger.info("Top %d predictions for 252-day forward return:\n%s", top_n, predictions.head(top_n).to_string(index=False))
 
-    # --- Stage 7: Backtest ---
-    bt_cfg_raw = raw_cfg.get('backtest', {})
-    if bt_cfg_raw.get('run', True):
-        logger.info("Running cross-sectional backtest...")
-        bt_cfg = BacktestConfig(
-            use_model_score=bt_cfg_raw.get('use_model_score', True),
-            score_col=bt_cfg_raw.get('score_col'),
-            top_n=int(bt_cfg_raw.get('top_n', 20)),
-            bottom_n=int(bt_cfg_raw.get('bottom_n', 20)),
-            require_min_cross_section=int(bt_cfg_raw.get('require_min_cross_section', 30)),
-            date_step=int(bt_cfg_raw.get('date_step', 1)),
-            max_dates=bt_cfg_raw.get('max_dates'),
-            save_picks=bool(bt_cfg_raw.get('save_picks', True)),
-        )
-        bt_summary = run_backtest(bt_cfg)
-        logger.info("Backtest summary: %s", json.dumps(bt_summary, indent=2))
-
-    logger.info("Pipeline run finished successfully.")
 
 
 if __name__ == "__main__":

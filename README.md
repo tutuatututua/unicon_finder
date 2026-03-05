@@ -47,14 +47,26 @@ To measure **realistic historical performance**, use the purged walk-forward bac
 It also applies a **purge gap** (by default equal to the target horizon, e.g. 252 trading days for `target_fwd_252d`) to reduce label-overlap leakage.
 
 ```powershell
-python .\scripts\backtest\walkforward_backtest.py --valid-days 252 --test-days 63 --step-days 63 --top-n 20 --rebalance-step 21
+python .\scripts\backtest\walkforward_backtest.py --max-splits 10 --slide-by test --start-date 2010-01-01
 ```
+
+Notes:
+- Walk-forward windows are defined in [scripts/backtest/walkforward/config.py](scripts/backtest/walkforward/config.py).
+- The walk-forward run advances by a full window (non-overlapping): when `slide_by=test`, each split advances by `test_days`.
+- The trade/benchmark return horizon (`holding_days`) is inferred from the target column name (e.g. `target_fwd_252d`).
+- The purge gap is `purge_days` (default 252 trading days). It should usually be set close to the target horizon to reduce label-overlap leakage.
 
 Outputs are written under `backtest/walkforward/`:
 
 - `summary.json`: high-level summary
 - `splits.csv`: metrics per walk-forward split
 - `trades.csv`: per-rebalance portfolio forward returns vs benchmark
+
+To compare against the S&P 500, provide `data/benchmark/sp500.csv` (columns: `date` and `close` or `adj_close`) and run:
+
+```powershell
+python .\scripts\backtest\backtest_sp500.py
+```
 
 ## Training: how it works
 

@@ -128,15 +128,31 @@ def build_features(
             logger.info("No tickers required feature updates; keeping existing features unchanged.")
             full = existing
         else:
-            new_part = pd.concat(updated_frames, axis=0, ignore_index=True)
-            all_cols = sorted(set(existing.columns).union(set(new_part.columns)))
-            existing_u = existing.reindex(columns=all_cols)
-            new_part_u = new_part.reindex(columns=all_cols)
+            new_part = pd.concat(updated_frames, axis=0, ignore_index=True, sort=False, copy=False)
+            new_part["date"] = pd.to_datetime(new_part["date"], utc=True).dt.tz_localize(None).dt.normalize()
 
-            combined = pd.concat([existing_u, new_part_u], axis=0, ignore_index=True)
-            combined.sort_values(["ticker", "date"], inplace=True)
-            combined = combined.drop_duplicates(subset=["ticker", "date"], keep="last")
+            # Downcast early to reduce peak memory during concat/align.
+            downcast_float64_inplace(existing)
+            downcast_float64_inplace(new_part)
 
+            # Replace any overlapping region for updated tickers instead of
+            # concatenating everything and forcing a full-frame dedupe/reindex.
+            #
+            # This avoids pandas internal block consolidation that can allocate
+            # multi-GB float64 arrays when the panel is large (tens of millions
+            # of rows).
+            min_new_date_by_ticker = new_part.groupby("ticker", dropna=False)["date"].min()
+            cutoff = existing["ticker"].map(min_new_date_by_ticker)
+            existing_keep = cutoff.isna() | (existing["date"] < cutoff)
+            existing_trim = existing.loc[existing_keep]
+
+            # De-dup within the newly computed portion (cheap) to protect against
+            # upstream raw data duplicates.
+            new_part = new_part.sort_values(["ticker", "date"]).drop_duplicates(
+                subset=["ticker", "date"], keep="last"
+            )
+
+            combined = pd.concat([existing_trim, new_part], axis=0, ignore_index=True, sort=False, copy=False)
             downcast_float64_inplace(combined)
             full = combined.reset_index(drop=True)
 

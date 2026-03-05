@@ -38,6 +38,7 @@ class Paths:
     predictions: Path = Path("models/predictions.csv")
     feature_meta: Path = Path("models/features.json")
     metrics: Path = Path("models/metrics.json")
+    train_config: Path = Path("models/config.json")
 
 
 PATHS = Paths()
@@ -91,6 +92,47 @@ def _load_best_iteration(metrics_path: Path) -> Optional[int]:
         return None
 
 
+def _load_ticker_chunk_size(config_path: Path) -> Optional[int]:
+    """Load ticker_chunk_size from training config.
+
+    Returns None if missing/invalid.
+    """
+
+    if not config_path.exists():
+        return None
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        v = payload.get("ticker_chunk_size")
+        if v is None:
+            return None
+        cs = int(v)
+        return cs if cs > 0 else None
+    except Exception:
+        return None
+
+
+def _ensure_chunk_id(feats: pd.DataFrame, *, chunk_size: int) -> pd.DataFrame:
+    """Compute per-date chunk_id consistent with training.
+
+    Chunking is stable by ticker sort within each date.
+    """
+
+    if "chunk_id" in feats.columns:
+        return feats
+    if chunk_size <= 0:
+        return feats
+    if "date" not in feats.columns or "ticker" not in feats.columns:
+        return feats
+
+    feats = feats.copy()
+    # Rank by ticker within each date (1..N), then make 0-based chunk ids.
+    pos0 = feats.groupby("date", sort=False)["ticker"].rank(method="first", ascending=True).astype(int) - 1
+    feats["chunk_id"] = (pos0 // int(chunk_size)).astype(int)
+    return feats
+
+
 # --------------------------------------------------------------------------------------
 # Public API
 # --------------------------------------------------------------------------------------
@@ -135,6 +177,11 @@ def predict(
     model_features = list(rank_booster.feature_name())
     if not model_features:
         raise RuntimeError("Loaded model has no feature names.")
+
+    # Backward compat: older models may have been trained with a helper column in feature list.
+    if "chunk_id" in model_features and "chunk_id" not in feats.columns:
+        cs = _load_ticker_chunk_size(p.train_config) or 200
+        feats = _ensure_chunk_id(feats, chunk_size=int(cs))
 
     score_sign = _load_score_sign(p.metrics)
 

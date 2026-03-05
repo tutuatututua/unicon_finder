@@ -11,6 +11,8 @@ Behavior:
 from pathlib import Path
 from typing import List, Optional
 
+import logging
+
 from scripts.config.config import load_yaml_config
 from scripts.config.paths import ProjectPaths
 import yfinance as yf
@@ -18,6 +20,10 @@ import pandas as pd
 from tqdm import tqdm
 from scripts.config.logging import get_logger  # switched to absolute import for script execution
 logger = get_logger(__name__)
+
+# yfinance can emit noisy ERROR logs for tickers with no data. We rely on our own
+# logging for pipeline visibility.
+logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_RAW_DIR = Path("data/raw")
@@ -46,6 +52,11 @@ def _fetch_yahoo_daily_range(ticker: str, start: Optional[pd.Timestamp], end: Op
     If start is None, falls back to full history (period='max').
     """
     try:
+        if start is not None and end is not None:
+            s = pd.to_datetime(start)
+            e = pd.to_datetime(end)
+            if s > e:
+                return pd.DataFrame()
         tk = yf.Ticker(ticker)
         if start is None:
             df = tk.history(period='max', interval='1d', auto_adjust=True)
@@ -124,7 +135,9 @@ def download_full_history(
             logger.info(f"Skipping {t}: file exists and incremental disabled")
             continue
 
-        # Incremental update: read last saved date and fetch [last+1d, today]
+        # Incremental update: read last saved date and fetch [last+1d, last_business_day].
+        # Daily bars for "today" are often unavailable until after market close;
+        # requesting through a future date can cause noisy yfinance errors.
         try:
             cur = pd.read_parquet(p, columns=['date'])
             cur['date'] = pd.to_datetime(cur['date'], utc=True).dt.tz_localize(None).dt.normalize()
@@ -136,9 +149,15 @@ def download_full_history(
             last_dt = pd.to_datetime(cur['date']).max()
 
         start = (last_dt + pd.Timedelta(days=1)) if last_dt is not None else None
-        # Compute 'end' as UTC midnight (tz-naive). In newer pandas, Timestamp.utcnow() is tz-aware (UTC),
-        # so we must not tz_localize('UTC') on it. Normalize first (keeps UTC), then drop tz to get naive.
-        end = pd.Timestamp.utcnow().normalize().tz_localize(None)
+
+        # End date (inclusive): last business day in UTC (tz-naive midnight).
+        today_utc = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+        end = (today_utc - pd.tseries.offsets.BDay(1))
+
+        if start is not None and pd.to_datetime(start) > pd.to_datetime(end):
+            logger.info(f"No new rows for {t} since {last_dt}")
+            continue
+
         df_new = _fetch_yahoo_daily_range(t, start=start, end=end)
         if df_new.empty:
             logger.info(f"No new rows for {t} since {last_dt}")

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+import time
+
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -10,7 +12,7 @@ from scripts.config.logging import get_logger
 
 from .artifacts import export_feature_importance, export_learning_curve, save_model, write_json
 from .config import TrainValidSplitConfig, build_lgb_params
-from .dataset import add_date_rank_relevance, build_split_bundle
+from .dataset import add_date_rank_relevance, add_ticker_chunk_id, build_split_bundle
 from .io import collect_feature_cols, extract_categorical_levels, filter_feature_cols, load_panel, resolve_target
 from .types import TrainingPaths
 
@@ -62,7 +64,7 @@ def time_train_valid_split(
     valid_start = pd.Timestamp(valid_dates[0]).normalize()
     valid_end = pd.Timestamp(valid_dates[-1]).normalize()
 
-    valid_start_idx = int(dates.get_indexer([valid_start])[0])
+    valid_start_idx = int(dates.get_indexer(pd.Index([valid_start]))[0])
     train_end_idx = valid_start_idx - forward_gap_days - 1
     if train_end_idx < 0:
         raise RuntimeError("forward_gap_days too large for available history")
@@ -194,51 +196,94 @@ def train_single_split(
     p = paths or TrainingPaths()
     target_col = cfg.target_col or resolve_target(p)
 
+    t_pipeline0 = time.perf_counter()
+
     logger.info(
-        "Train/valid split training: target_col=%s train_days=%s valid_days=%d forward_gap_days=%d min_cross_section=%d feature_scaling=%s",
+        "Train/valid split training: target_col=%s train_days=%s valid_days=%d forward_gap_days=%d min_cross_section=%d",
         str(target_col),
         str(cfg.train_days),
         int(cfg.valid_days),
         int(cfg.forward_gap_days),
         int(cfg.min_cross_section),
-        str(cfg.feature_scaling),
     )
 
-    df = load_panel(p, target_col=str(target_col), min_cross_section=int(cfg.min_cross_section), target_clip=float(cfg.target_clip))
+    t0 = time.perf_counter()
+    df = load_panel(
+        p,
+        target_col=str(target_col),
+        min_cross_section=int(cfg.min_cross_section),
+        target_clip=float(cfg.target_clip),
+    )
+    logger.info(
+        "Loaded panel: rows=%d cols=%d n_dates=%d in %.2fs",
+        int(len(df)),
+        int(df.shape[1]),
+        int(df["date"].nunique()) if "date" in df.columns else -1,
+        float(time.perf_counter() - t0),
+    )
+
+    # Optional: split each date into ticker chunks (default 200).
+    chunk_size = int(getattr(cfg, "ticker_chunk_size", 0) or 0)
+    if chunk_size > 0:
+        t0 = time.perf_counter()
+        df = add_ticker_chunk_id(df, chunk_size=chunk_size, out_col="chunk_id")
+        logger.info(
+            "Added ticker chunk ids: chunk_size=%d in %.2fs",
+            int(chunk_size),
+            float(time.perf_counter() - t0),
+        )
+        relevance_group_cols = ("date", "chunk_id")
+    else:
+        relevance_group_cols = ("date",)
 
     # Relevance labels (safe: per-date cross-sectional ranking only)
+    t0 = time.perf_counter()
     df = add_date_rank_relevance(
         df,
         target_col=str(target_col),
         n_bins=int(cfg.n_relevance_bins),
         force_negatives_to_zero=bool(cfg.force_negatives_to_zero),
+        group_cols=relevance_group_cols,
         out_col="relevance",
+    )
+    logger.info(
+        "Built relevance labels: n_bins=%d group_cols=%s in %.2fs",
+        int(cfg.n_relevance_bins),
+        "+".join(map(str, relevance_group_cols)),
+        float(time.perf_counter() - t0),
     )
 
     feature_cols = collect_feature_cols(df, target_col=str(target_col))
-    if not bool(cfg.include_sector_industry):
-        feature_cols = [c for c in feature_cols if c not in {"sector", "industry"}]
 
-    feature_cols, filt_stats = filter_feature_cols(
-        df,
-        feature_cols,
-        drop_constant=bool(cfg.drop_constant_features),
-        max_missing_frac=float(cfg.max_missing_frac),
-        min_unique_values=int(cfg.min_unique_values),
+    t0 = time.perf_counter()
+    feature_cols, filt_stats = filter_feature_cols(df, feature_cols)
+    logger.info(
+        "Filtered features: kept=%d input=%d in %.2fs",
+        int(filt_stats.get("kept", len(feature_cols))),
+        int(filt_stats.get("input", -1)),
+        float(time.perf_counter() - t0),
     )
 
     cat_levels = {k: v for k, v in extract_categorical_levels(df).items() if k in set(feature_cols)}
 
     # Chronological split
+    t0 = time.perf_counter()
     train_df, valid_df, split_meta = time_train_valid_split(
         df,
         valid_days=int(cfg.valid_days),
         forward_gap_days=int(cfg.forward_gap_days),
         train_days=(int(cfg.train_days) if cfg.train_days is not None else None),
     )
+    logger.info(
+        "Materialized split frames: train_rows=%d valid_rows=%d in %.2fs",
+        int(len(train_df)),
+        int(len(valid_df)),
+        float(time.perf_counter() - t0),
+    )
 
     train_end = pd.to_datetime(split_meta["train_end"]).normalize()
 
+    t0 = time.perf_counter()
     bundle = build_split_bundle(
         train_df,
         valid_df,
@@ -247,12 +292,18 @@ def train_single_split(
         feature_cols=list(feature_cols),
         train_end_date=pd.Timestamp(train_end),
     )
+    logger.info(
+        "Built LightGBM bundle: %s in %.2fs",
+        ", ".join([f"{k}={v}" for k, v in (bundle.meta or {}).items()]),
+        float(time.perf_counter() - t0),
+    )
 
     # No train-time preprocessing.
 
     lgb_params = build_lgb_params(cfg, primary_k=primary_k)
 
-    primary_eval_k = int((lgb_params.get("eval_at") or [200])[0])
+    primary_eval_k = int((lgb_params.get("eval_at") or [20])[0])
+    t0 = time.perf_counter()
     booster, evals = train_ranker(
         bundle,
         params=lgb_params,
@@ -260,6 +311,7 @@ def train_single_split(
         early_stopping_rounds=int(early_stopping_rounds),
         log_evaluation_period=int(cfg.log_evaluation_period or 0),
     )
+    logger.info("LightGBM training finished in %.2fs", float(time.perf_counter() - t0))
 
     best_iter = _best_iter_from_evals(evals, primary_k=int(primary_eval_k))
     if best_iter <= 0:
@@ -304,5 +356,7 @@ def train_single_split(
     write_json(p.metrics_path, metrics_payload)
 
     logger.info("Training done: best_iteration=%s valid_%s=%.6f", str(best_iter), str(metric_key), float(valid_ndcg))
+
+    logger.info("train_single_split total time: %.2fs", float(time.perf_counter() - t_pipeline0))
 
     return metrics_payload
